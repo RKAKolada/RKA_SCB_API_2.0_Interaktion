@@ -1,6 +1,9 @@
 # RKA_SCB_API_2.0_Interaktion
 Kejsar Zings formelsamling (RKAs interaktion med SCB API 2.0. Hämta metadata och data)
 
+Tanken är att dessa funktioner/script ska i huvudsak ska användas för internt bruk på RKA.
+De ligger dock öppna för att slippa diverse lösenord osv. Inga hemligheter ändå.
+
 ## SCB_API_funktionssamling.R
 Innehåller en handfull funktioner som underlättar RKAs datahämtning från SCBs API v.2.
 En funktion hämtar all tillgänglig metadata för en specifik tabell baseat på TAB-id. 
