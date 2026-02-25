@@ -48,11 +48,13 @@ fetch_scb_metadata <- function(table_id) {
 # Hämta data --------------------------------------------------------------
 # Mata in tab-ID och år samt sökväg till metadatafilen
 fetch_scb_data <- function(tab_id, year, metadata_path) {
-  
   # Install missing required packages
-  if (!require("httr")) install.packages("httr")
-  if (!require("jsonlite")) install.packages("jsonlite")
-  if (!require("readxl")) install.packages("readxl")
+  if (!require("httr"))
+    install.packages("httr")
+  if (!require("jsonlite"))
+    install.packages("jsonlite")
+  if (!require("readxl"))
+    install.packages("readxl")
   
   # Kontrollerar tillgång till metadatafilen
   if (!file.exists(metadata_path)) {
@@ -78,15 +80,13 @@ fetch_scb_data <- function(tab_id, year, metadata_path) {
   selection <- list()
   
   # Hårdkodar in regionvalet "*" - dvs hämtar alltid alla tillgängliga regioner
-  selection[[length(selection) + 1]] <- list(
-    variableCode = "Region",
-    valueCodes = I(c("*"))
-  )
+  selection[[length(selection) + 1]] <- list(variableCode = "Region", valueCodes = I(c("*")))
   
   # Identifierar unika variabelkoder ur kodvariabelkolumner
   for (col in variable_cols) {
     unique_values <- unique(na.omit(as.character(metadata_filtered[[col]])))
-    if (length(unique_values) == 0) next
+    if (length(unique_values) == 0)
+      next
     
     selection_item <- list(variableCode = col)
     
@@ -105,10 +105,7 @@ fetch_scb_data <- function(tab_id, year, metadata_path) {
   
   # Halvhårdkodar in tidsvariabeln så det blir det året som är angivet i
   # funktionens year-argument
-  selection[[length(selection) + 1]] <- list(
-    variableCode = "Tid",
-    valueCodes = I(c(as.character(year)))
-  )
+  selection[[length(selection) + 1]] <- list(variableCode = "Tid", valueCodes = I(c(as.character(year))))
   
   # Skapar POST API-urlen
   api_url <- paste0(
@@ -120,10 +117,96 @@ fetch_scb_data <- function(tab_id, year, metadata_path) {
   # Skapar POST Bodyn (Är postbody en musikgenre?)
   request_body <- list(selection = selection)
   
-  # Printar ut hela anropet för transparens 
+  # Printar ut hela anropet för transparens
   cat("API URL:", api_url, "\n")
   cat("Request body:\n")
-  cat(jsonlite::toJSON(request_body, auto_unbox = TRUE, pretty = TRUE), "\n\n")
+  cat(jsonlite::toJSON(request_body, auto_unbox = TRUE, pretty = TRUE),
+      "\n\n")
+  
+  # ---- Hantera ContentsCode automatiskt om flera värden ----
+  
+  contents_index <- which(sapply(selection, function(x)
+    x$variableCode) == "ContentsCode")
+  
+  if (length(contents_index) == 1) {
+    contents_values <- selection[[contents_index]]$valueCodes
+    
+    # Om fler än ett ContentsCode → dela upp anropet
+    if (length(contents_values) > 1) {
+      message("Flera contentscodes finns i anropet - delar upp kalaset!")
+      
+      all_results <- list()
+      
+      for (code in contents_values) {
+        message("Hämtar contentscode: ", code)
+        
+        # Kopiera selection
+        selection_temp <- selection
+        selection_temp[[contents_index]]$valueCodes <- I(code)
+        
+        request_body_temp <- list(selection = selection_temp)
+        
+        response <- httr::POST(
+          url = api_url,
+          body = jsonlite::toJSON(request_body_temp, auto_unbox = TRUE),
+          httr::content_type_json(),
+          encode = "json"
+        )
+        
+        if (httr::status_code(response) != 200) {
+          stop(
+            paste(
+              "API request failed with status code:",
+              httr::status_code(response),
+              "\nResponse:",
+              httr::content(response, "text"),
+              "\nRequest body:",
+              jsonlite::toJSON(
+                request_body_temp,
+                auto_unbox = TRUE,
+                pretty = TRUE
+              )
+            )
+          )
+        }
+        
+        response_content <- httr::content(response, "text", encoding = "UTF-8")
+        json_data <- jsonlite::fromJSON(response_content)
+        
+        dimensions <- json_data$dimension
+        dim_names <- names(dimensions)
+        
+        dim_labels_list <- lapply(dim_names, function(dim) {
+          dimensions[[dim]]$category$label
+        })
+        names(dim_labels_list) <- dim_names
+        
+        grid <- expand.grid(rev(dim_labels_list), stringsAsFactors = FALSE)
+        grid <- grid[, rev(names(grid)), drop = FALSE]
+        
+        # Region_kod-hantering (oförändrad logik)
+        if ("Region" %in% dim_names) {
+          region_codes <- names(dimensions$Region$category$label)
+          n_regions <- length(region_codes)
+          n_other_dims <- nrow(grid) / n_regions
+          region_kod_column <- rep(region_codes, each = n_other_dims)
+          region_col_index <- which(names(grid) == "Region")
+          
+          if (region_col_index < ncol(grid)) {
+            grid <- cbind(grid[, 1:region_col_index, drop = FALSE], Region_kod = region_kod_column, grid[, (region_col_index + 1):ncol(grid), drop = FALSE])
+          } else {
+            grid$Region_kod <- region_kod_column
+          }
+        }
+        
+        grid$value <- as.vector(json_data$value)
+        
+        all_results[[code]] <- grid
+      }
+      
+      return(do.call(rbind, all_results))
+    }
+  }
   
   # Gör anropet
   response <- httr::POST(
@@ -135,9 +218,16 @@ fetch_scb_data <- function(tab_id, year, metadata_path) {
   
   # Kollar status på svaret - om 200 så fortsätt annars stopp.
   if (httr::status_code(response) != 200) {
-    stop(paste("API request failed with status code:", httr::status_code(response),
-               "\nResponse:", httr::content(response, "text"),
-               "\nRequest body:", jsonlite::toJSON(request_body, auto_unbox = TRUE, pretty = TRUE)))
+    stop(
+      paste(
+        "API request failed with status code:",
+        httr::status_code(response),
+        "\nResponse:",
+        httr::content(response, "text"),
+        "\nRequest body:",
+        jsonlite::toJSON(request_body, auto_unbox = TRUE, pretty = TRUE)
+      )
+    )
   }
   
   # Parsar svaret
@@ -176,11 +266,7 @@ fetch_scb_data <- function(tab_id, year, metadata_path) {
     region_col_index <- which(names(grid) == "Region")
     
     if (region_col_index < ncol(grid)) {
-      grid <- cbind(
-        grid[, 1:region_col_index, drop = FALSE],
-        Region_kod = region_kod_column,
-        grid[, (region_col_index + 1):ncol(grid), drop = FALSE]
-      )
+      grid <- cbind(grid[, 1:region_col_index, drop = FALSE], Region_kod = region_kod_column, grid[, (region_col_index + 1):ncol(grid), drop = FALSE])
     } else {
       # Om Region är sista kolumnen
       grid$Region_kod <- region_kod_column
