@@ -85,7 +85,7 @@ inlasfil <- inlasfil %>%
 
 # Lägger till bortfallskod, bfk
 inlasfil <- inlasfil %>%
-  mutate(bfk = case_when(is.na(value) ~ "1", TRUE ~ "0")
+  mutate(bfk = case_when(is.na(value) ~ "1", TRUE ~ "0"))
   
 # Blankar vid bfk1
 inlasfil$value <- ifelse(inlasfil$bfk == "1", "", inlasfil$value)
