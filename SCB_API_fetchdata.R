@@ -58,6 +58,10 @@ scb_data <- scb_data %>%
 scb_data <- scb_data %>% filter(str_starts(kompID, "K"))
 
 
+# Filtrerar bort regioner som inte ingår i 312-listan
+inlasfil <- inlasfil %>%
+  filter(Region_kod %in% allregcodes)
+
 
 # Transformerar till inläsningsfil ----------------------------------------
 inlasfil <- scb_data %>%
@@ -71,9 +75,6 @@ inlasfil <- scb_data %>%
     value = as.character(value),
   )
 
-# Filtrerar bort regioner som inte ingår i 312-listan
-inlasfil <- inlasfil %>%
-  filter(regID %in% allregcodes)
 
 # Aggregerar rader med samma kompID
 inlasfil <- inlasfil %>%
