@@ -6,10 +6,11 @@ library(tidyverse)
 # ▀███▀ ▀███▀ ██ ██   ████▀  ██ ██ ▀██ ██▀██    ▀█▀  ██▀██ ██▄▄▄
 #
 
-# Ange TAB-id -------------------------------------------------------------
+
+# Ange levid --------------------------------------------------------------
 levid <- "" # <---- Till exempel "L00561A"
 
-# Ange leverans-id --------------------------------------------------------
+# Ange TAB-id -------------------------------------------------------------
 tabid <- "" # <---- Till exempel "TAB561"
 
 # Ange år -----------------------------------------------------------------
@@ -59,7 +60,7 @@ scb_data <- scb_data %>% filter(str_starts(kompID, "K"))
 
 
 # Filtrerar bort regioner som inte ingår i 312-listan
-inlasfil <- inlasfil %>%
+scb_data <- scb_data %>%
   filter(Region_kod %in% allregcodes)
 
 
