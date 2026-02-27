@@ -47,50 +47,43 @@ fetch_scb_metadata <- function(table_id) {
 
 # Hämta data --------------------------------------------------------------
 # Mata in tab-ID och år samt sökväg till metadatafilen
+# Funktionen innehåller en hårdkodad limit på 125 000 celler
+# SCB:s API tillåter egentligen 150 000 men denna tar lite höjd för om
+# antalet regioner skulle vara varierande
+
 fetch_scb_data <- function(tab_id, year, metadata_path) {
-  # Install missing required packages
-  if (!require("httr"))
-    install.packages("httr")
-  if (!require("jsonlite"))
-    install.packages("jsonlite")
-  if (!require("readxl"))
-    install.packages("readxl")
+  if (!require("httr")) install.packages("httr")
+  if (!require("jsonlite")) install.packages("jsonlite")
+  if (!require("readxl")) install.packages("readxl")
   
-  # Kontrollerar tillgång till metadatafilen
   if (!file.exists(metadata_path)) {
     stop(paste("Metadata file not found:", metadata_path))
   }
   
-  # Läser in metadatafil
   metadata <- readxl::read_excel(metadata_path)
-  
-  # Behåller bara raderna med K-innehåll i kompID-kolumnen
   metadata_filtered <- metadata[grepl("K", metadata$kompID), ]
   
   if (nrow(metadata_filtered) == 0) {
     stop("No rows found with 'K' in kompID column")
   }
   
-  # Identifierar kolumner med variabelkoder - exkluderar de med "_label"
-  # dvs de mänskligt läsbara
+  # Intern cell-limit - satt lägre än SCB:s 150 000 som säkerhetsmarginal
+  # Region med "*" antas max vara 350 enheter men är i praktiken oftast 312
+  CELL_LIMIT <- 125000L
+  
   all_cols <- names(metadata_filtered)
   variable_cols <- all_cols[!grepl("_label|kompID", all_cols, ignore.case = TRUE)]
   
-  # Skapar urvalslista för API-anropet
+  # ---- Bygg selection ----
   selection <- list()
-  
-  # Hårdkodar in regionvalet "*" - dvs hämtar alltid alla tillgängliga regioner
   selection[[length(selection) + 1]] <- list(variableCode = "Region", valueCodes = I(c("*")))
   
-  # Identifierar unika variabelkoder ur kodvariabelkolumner
   for (col in variable_cols) {
     unique_values <- unique(na.omit(as.character(metadata_filtered[[col]])))
-    if (length(unique_values) == 0)
-      next
+    if (length(unique_values) == 0) next
     
     selection_item <- list(variableCode = col)
     
-    # Finns codeList?
     codelist_col <- paste0(col, "_codeList")
     if (codelist_col %in% names(metadata_filtered)) {
       codelist_values <- unique(na.omit(as.character(metadata_filtered[[codelist_col]])))
@@ -103,181 +96,150 @@ fetch_scb_data <- function(tab_id, year, metadata_path) {
     selection[[length(selection) + 1]] <- selection_item
   }
   
-  # Halvhårdkodar in tidsvariabeln så det blir det året som är angivet i
-  # funktionens year-argument
   selection[[length(selection) + 1]] <- list(variableCode = "Tid", valueCodes = I(c(as.character(year))))
   
-  # Skapar POST API-urlen
   api_url <- paste0(
     "https://statistikdatabasen.scb.se/api/v2/tables/",
     tab_id,
     "/data?lang=sv&outputFormat=json-stat2"
   )
   
-  # Skapar POST Bodyn (Är postbody en musikgenre?)
-  request_body <- list(selection = selection)
+  # ---- Räkna celler för en selection ----
+  # Region med "*" uppskattas konservativt till 350
+  count_cells <- function(sel) {
+    counts <- sapply(sel, function(x) {
+      if (x$variableCode == "Region" && length(x$valueCodes) == 1 && x$valueCodes == "*") {
+        return(350L)
+      }
+      length(x$valueCodes)
+    })
+    prod(counts, na.rm = TRUE)
+  }
   
-  # Printar ut hela anropet för transparens
-  cat("API URL:", api_url, "\n")
-  cat("Request body:\n")
-  cat(jsonlite::toJSON(request_body, auto_unbox = TRUE, pretty = TRUE),
-      "\n\n")
+  # ---- Parsa API-svar till grid ----
+  parse_response <- function(response) {
+    response_content <- httr::content(response, "text", encoding = "UTF-8")
+    json_data <- jsonlite::fromJSON(response_content)
+    
+    dimensions <- json_data$dimension
+    dim_names <- names(dimensions)
+    
+    dim_labels_list <- lapply(dim_names, function(dim) {
+      dimensions[[dim]]$category$label
+    })
+    names(dim_labels_list) <- dim_names
+    
+    grid <- expand.grid(rev(dim_labels_list), stringsAsFactors = FALSE)
+    grid <- grid[, rev(names(grid)), drop = FALSE]
+    
+    if ("Region" %in% dim_names) {
+      region_codes <- names(dimensions$Region$category$label)
+      n_regions <- length(region_codes)
+      n_other_dims <- nrow(grid) / n_regions
+      region_kod_column <- rep(region_codes, each = n_other_dims)
+      region_col_index <- which(names(grid) == "Region")
+      
+      if (region_col_index < ncol(grid)) {
+        grid <- cbind(
+          grid[, 1:region_col_index, drop = FALSE],
+          Region_kod = region_kod_column,
+          grid[, (region_col_index + 1):ncol(grid), drop = FALSE]
+        )
+      } else {
+        grid$Region_kod <- region_kod_column
+      }
+    }
+    
+    grid$value <- as.vector(json_data$value)
+    grid
+  }
   
-  # ---- Hantera ContentsCode automatiskt om flera värden ----
+  # ---- Gör ett enskilt API-anrop ----
+  do_request <- function(sel) {
+    request_body <- list(selection = sel)
+    cat("API URL:", api_url, "\n")
+    cat("Request body:\n")
+    cat(jsonlite::toJSON(request_body, auto_unbox = TRUE, pretty = TRUE), "\n\n")
+    
+    response <- httr::POST(
+      url = api_url,
+      body = jsonlite::toJSON(request_body, auto_unbox = TRUE),
+      httr::content_type_json(),
+      encode = "json"
+    )
+    
+    if (httr::status_code(response) != 200) {
+      stop(paste(
+        "API request failed with status code:", httr::status_code(response),
+        "\nResponse:", httr::content(response, "text", encoding = "UTF-8"),
+        "\nRequest body:", jsonlite::toJSON(request_body, auto_unbox = TRUE, pretty = TRUE)
+      ))
+    }
+    
+    parse_response(response)
+  }
   
-  contents_index <- which(sapply(selection, function(x)
-    x$variableCode) == "ContentsCode")
+  # ---- Dela upp selection om för många celler ----
+  fetch_recursive <- function(sel) {
+    n_cells <- count_cells(sel)
+    
+    if (n_cells <= CELL_LIMIT) {
+      message(sprintf("Hämtar anrop med ~%s celler", format(n_cells, big.mark = " ")))
+      return(do_request(sel))
+    }
+    
+    # Hitta variabel att chunka på: flest värden, ej Region eller Tid
+    skip_vars <- c("Region", "Tid")
+    candidate_sizes <- sapply(sel, function(x) {
+      if (x$variableCode %in% skip_vars) return(0L)
+      length(x$valueCodes)
+    })
+    
+    split_index <- which.max(candidate_sizes)
+    split_var   <- sel[[split_index]]$variableCode
+    split_vals  <- sel[[split_index]]$valueCodes
+    
+    other_cells <- n_cells / length(split_vals)
+    chunk_size  <- max(1L, floor(CELL_LIMIT / other_cells))
+    chunks      <- split(split_vals, ceiling(seq_along(split_vals) / chunk_size))
+    
+    message(sprintf(
+      "Anropet har ~%s celler (limit %s) - delar upp '%s' (%d värden) i %d chunks om max %d värden",
+      format(n_cells, big.mark = " "), format(CELL_LIMIT, big.mark = " "),
+      split_var, length(split_vals), length(chunks), chunk_size
+    ))
+    
+    all_results <- lapply(seq_along(chunks), function(i) {
+      message(sprintf("  Chunk %d/%d för '%s'", i, length(chunks), split_var))
+      sel_temp <- sel
+      sel_temp[[split_index]]$valueCodes <- I(chunks[[i]])
+      fetch_recursive(sel_temp)
+    })
+    
+    do.call(rbind, all_results)
+  }
   
-  if (length(contents_index) == 1) {
+  # ---- Hantera ContentsCode med flera värden ----
+  contents_index <- which(sapply(selection, function(x) x$variableCode) == "ContentsCode")
+  
+  if (length(contents_index) == 1 && length(selection[[contents_index]]$valueCodes) > 1) {
+    message("Flera ContentsCodes - delar upp per ContentsCode")
     contents_values <- selection[[contents_index]]$valueCodes
     
-    # Om fler än ett ContentsCode → dela upp anropet
-    if (length(contents_values) > 1) {
-      message("Flera contentscodes finns i anropet - delar upp kalaset!")
-      
-      all_results <- list()
-      
-      for (code in contents_values) {
-        message("Hämtar contentscode: ", code)
-        
-        # Kopiera selection
-        selection_temp <- selection
-        selection_temp[[contents_index]]$valueCodes <- I(code)
-        
-        request_body_temp <- list(selection = selection_temp)
-        
-        response <- httr::POST(
-          url = api_url,
-          body = jsonlite::toJSON(request_body_temp, auto_unbox = TRUE),
-          httr::content_type_json(),
-          encode = "json"
-        )
-        
-        if (httr::status_code(response) != 200) {
-          stop(
-            paste(
-              "API request failed with status code:",
-              httr::status_code(response),
-              "\nResponse:",
-              httr::content(response, "text"),
-              "\nRequest body:",
-              jsonlite::toJSON(
-                request_body_temp,
-                auto_unbox = TRUE,
-                pretty = TRUE
-              )
-            )
-          )
-        }
-        
-        response_content <- httr::content(response, "text", encoding = "UTF-8")
-        json_data <- jsonlite::fromJSON(response_content)
-        
-        dimensions <- json_data$dimension
-        dim_names <- names(dimensions)
-        
-        dim_labels_list <- lapply(dim_names, function(dim) {
-          dimensions[[dim]]$category$label
-        })
-        names(dim_labels_list) <- dim_names
-        
-        grid <- expand.grid(rev(dim_labels_list), stringsAsFactors = FALSE)
-        grid <- grid[, rev(names(grid)), drop = FALSE]
-        
-        # Region_kod-hantering (oförändrad logik)
-        if ("Region" %in% dim_names) {
-          region_codes <- names(dimensions$Region$category$label)
-          n_regions <- length(region_codes)
-          n_other_dims <- nrow(grid) / n_regions
-          region_kod_column <- rep(region_codes, each = n_other_dims)
-          region_col_index <- which(names(grid) == "Region")
-          
-          if (region_col_index < ncol(grid)) {
-            grid <- cbind(grid[, 1:region_col_index, drop = FALSE], Region_kod = region_kod_column, grid[, (region_col_index + 1):ncol(grid), drop = FALSE])
-          } else {
-            grid$Region_kod <- region_kod_column
-          }
-        }
-        
-        grid$value <- as.vector(json_data$value)
-        
-        all_results[[code]] <- grid
-      }
-      
-      return(do.call(rbind, all_results))
-    }
+    all_results <- lapply(contents_values, function(code) {
+      message("Hämtar ContentsCode: ", code)
+      sel_temp <- selection
+      sel_temp[[contents_index]]$valueCodes <- I(code)
+      fetch_recursive(sel_temp)
+    })
+    
+    return(do.call(rbind, all_results))
   }
   
-  # Gör anropet
-  response <- httr::POST(
-    url = api_url,
-    body = jsonlite::toJSON(request_body, auto_unbox = TRUE),
-    httr::content_type_json(),
-    encode = "json"
-  )
-  
-  # Kollar status på svaret - om 200 så fortsätt annars stopp.
-  if (httr::status_code(response) != 200) {
-    stop(
-      paste(
-        "API request failed with status code:",
-        httr::status_code(response),
-        "\nResponse:",
-        httr::content(response, "text"),
-        "\nRequest body:",
-        jsonlite::toJSON(request_body, auto_unbox = TRUE, pretty = TRUE)
-      )
-    )
-  }
-  
-  # Parsar svaret
-  response_content <- httr::content(response, "text", encoding = "UTF-8")
-  json_data <- jsonlite::fromJSON(response_content)
-  
-  # Extraherar dimensioner
-  dimensions <- json_data$dimension
-  dim_names <- names(dimensions)
-  
-  # Skapar en lista med alla labels för varje dimension
-  dim_labels_list <- lapply(dim_names, function(dim) {
-    dimensions[[dim]]$category$label
-  })
-  names(dim_labels_list) <- dim_names
-  
-  # Skapar grid med labels
-  grid <- expand.grid(rev(dim_labels_list), stringsAsFactors = FALSE)
-  
-  # Reverserar kolumnordningen så den matchar original-dimensionerna
-  grid <- grid[, rev(names(grid)), drop = FALSE]
-  
-  # Om Region finns som dimension, lägg till Region_kod kolumn
-  if ("Region" %in% dim_names) {
-    # Hämtar regionkoderna (namnen på label-vektorn)
-    region_codes <- names(dimensions$Region$category$label)
-    
-    # Skapar en vektor med regionkoder som matchar grid's ordning
-    # genom att upprepa koderna i samma mönster som expand.grid skapade
-    n_regions <- length(region_codes)
-    n_other_dims <- nrow(grid) / n_regions
-    
-    region_kod_column <- rep(region_codes, each = n_other_dims)
-    
-    # Lägger till Region_kod kolumnen direkt efter Region
-    region_col_index <- which(names(grid) == "Region")
-    
-    if (region_col_index < ncol(grid)) {
-      grid <- cbind(grid[, 1:region_col_index, drop = FALSE], Region_kod = region_kod_column, grid[, (region_col_index + 1):ncol(grid), drop = FALSE])
-    } else {
-      # Om Region är sista kolumnen
-      grid$Region_kod <- region_kod_column
-    }
-  }
-  
-  # Lägger till värdena direkt
-  grid$value <- as.vector(json_data$value)
-  
-  return(grid)
+  fetch_recursive(selection)
 }
+
+
 
 # Hårdkodade kommun/region/riket-listan -----------------------------------
 # Används för filtrering
