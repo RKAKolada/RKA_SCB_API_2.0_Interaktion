@@ -39,7 +39,11 @@ scb_data <- fetch_scb_data(tabid, year_to_use, metapath)
 scb_data <- scb_data %>%
   unnest(cols = everything())
 
-
+# Tar bort "L" i regionernas regionkoder
+# + en specialare pga 'Region' Gotland.
+scb_data <- scb_data %>%
+  mutate(Region_kod = str_remove_all(Region_kod, "[^0-9]")) %>%
+  mutate(Region_kod = ifelse(Region == "Region Gotland", "09", Region_kod))
 
 # Läser in tabellens metadatafil ------------------------------------------
 # Tar bort kod-kolumnerna vid inläsning
