@@ -54,7 +54,7 @@ metadata <- metadata %>%
   rename_with( ~ str_remove(.x, "_label$"))
 # Filtrerar bort oönskade kombinationer
 metadata <- metadata %>% filter(str_starts(kompID, "K"))
-# Identifierar vilka koluner som finns i metadatan förutom kompID
+# Identifierar vilka kolumner som finns i metadatan förutom kompID
 variable_cols <- setdiff(names(metadata), "kompID")
 # Joinar sedan på hämtad data
 scb_data <- scb_data %>%
