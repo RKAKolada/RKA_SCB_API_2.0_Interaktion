@@ -60,7 +60,7 @@ fetch_scb_data <- function(tab_id, year, metadata_path) {
     stop(paste("Metadata file not found:", metadata_path))
   }
   
-  metadata <- readxl::read_excel(metadata_path)
+  metadata <- readxl::read_excel(metadata_path, col_types = "text")
   metadata_filtered <- metadata[grepl("K", metadata$kompID), ]
   
   if (nrow(metadata_filtered) == 0) {
