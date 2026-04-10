@@ -47,7 +47,7 @@ scb_data <- scb_data %>%
 
 # Läser in tabellens metadatafil ------------------------------------------
 # Tar bort kod-kolumnerna vid inläsning
-metadata <- read_excel(metapath, trim_ws = FALSE) %>%
+metadata <- read_excel(metapath, trim_ws = FALSE, col_type = "text") %>%
   select(ends_with("_label"), kompID)
 # Tar bort "_label"-delen från kolumnamnen:
 metadata <- metadata %>%
